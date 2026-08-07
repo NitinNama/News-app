@@ -1,0 +1,3 @@
+# Recommended external libraries for higher-fidelity parsing and requests
+feedparser>=6.0.10
+urllib3>=1.26.0

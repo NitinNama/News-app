@@ -1,0 +1,6 @@
+{
+  "name": "Factum",
+  "description": "An elegant, multi-source news aggregator that fetches live RSS feeds from popular platforms, allowing customization, search, bookmarking, and offline reading.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
