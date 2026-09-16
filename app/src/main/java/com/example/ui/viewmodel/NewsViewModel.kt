@@ -9,11 +9,14 @@ import com.example.data.model.NewsArticle
 import com.example.data.model.NewsSource
 import com.example.data.model.SavedArticle
 import com.example.data.repository.NewsRepository
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -29,6 +32,17 @@ class NewsViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _feedState = MutableStateFlow<FeedState>(FeedState.Loading)
     val feedState: StateFlow<FeedState> = _feedState.asStateFlow()
+
+    private val _isRefreshing = MutableStateFlow(false)
+    val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
+
+    private val _lastRefreshedTime = MutableStateFlow(System.currentTimeMillis())
+    val lastRefreshedTime: StateFlow<Long> = _lastRefreshedTime.asStateFlow()
+
+    private val _refreshStatusMessage = MutableStateFlow<String?>(null)
+    val refreshStatusMessage: StateFlow<String?> = _refreshStatusMessage.asStateFlow()
+
+    private var refreshJob: Job? = null
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
@@ -199,7 +213,7 @@ class NewsViewModel(application: Application) : AndroidViewModel(application) {
             com.example.util.NotificationHelper.fetchFcmToken(getApplication()) { token ->
                 _fcmToken.value = token
             }
-            com.example.util.NotificationHelper.syncFcmRegionTopics(_userRegion.value, getApplication())
+            com.example.util.NotificationHelper.syncFcmRegionTopics(getApplication(), _userRegion.value)
         }
     }
 
@@ -245,40 +259,73 @@ class NewsViewModel(application: Application) : AndroidViewModel(application) {
         initialValue = emptyList()
     )
 
-    fun refreshNews() {
-        viewModelScope.launch {
-            // Instantly load cached articles from Room database for seamless offline reading
-            val cachedArticles = repository.getCachedNews()
-            if (cachedArticles.isNotEmpty()) {
-                _feedState.value = FeedState.Success(cachedArticles)
-                if (_blindspotReport.value == null) {
-                    runBlindspotAnalysis(cachedArticles)
-                }
-            } else {
-                _feedState.value = FeedState.Loading
-            }
+    fun clearRefreshStatusMessage() {
+        _refreshStatusMessage.value = null
+    }
 
+    fun refreshNews(force: Boolean = false) {
+        if (refreshJob?.isActive == true) {
+            if (!force) return
+            refreshJob?.cancel()
+        }
+        refreshJob = viewModelScope.launch {
+            _isRefreshing.value = true
+            _refreshStatusMessage.value = null
             try {
-                val articles = repository.fetchLiveNews()
-                if (articles.isEmpty()) {
-                    if (_feedState.value !is FeedState.Success) {
-                        // Check if there are no enabled sources
-                        val enabled = allSources.value.any { it.isEnabled }
-                        if (!enabled) {
-                            _feedState.value = FeedState.Error("No sources are enabled. Please enable some news platforms in the Sources tab.")
+                // Instantly load cached articles from Room database for seamless offline reading if not already loaded
+                val cachedArticles = repository.getCachedNews()
+                if (cachedArticles.isNotEmpty() && _feedState.value !is FeedState.Success) {
+                    _feedState.value = FeedState.Success(cachedArticles)
+                    if (_blindspotReport.value == null) {
+                        runBlindspotAnalysis(cachedArticles)
+                    }
+                } else if (_feedState.value !is FeedState.Success) {
+                    _feedState.value = FeedState.Loading
+                }
+
+                val result = repository.fetchLiveNewsResult()
+                _lastRefreshedTime.value = System.currentTimeMillis()
+
+                if (result.isLiveNetwork && result.articles.isNotEmpty()) {
+                    _feedState.value = FeedState.Success(result.articles)
+                    _refreshStatusMessage.value = "Updated ${result.articles.size} stories from ${result.workingSourcesCount} sources"
+                    if (force || _blindspotReport.value == null) {
+                        runBlindspotAnalysis(result.articles)
+                    }
+                } else {
+                    val currentSources = try {
+                        repository.allSources.first()
+                    } catch (e: Exception) {
+                        emptyList()
+                    }
+                    val hasEnabledSources = currentSources.any { it.isEnabled }
+                    if (!hasEnabledSources) {
+                        _feedState.value = FeedState.Error("No sources are enabled. Please enable some news platforms in the Sources tab.")
+                    } else if (result.articles.isNotEmpty()) {
+                        _feedState.value = FeedState.Success(result.articles)
+                        _refreshStatusMessage.value = "Showing offline stories • Live feeds unreachable"
+                    } else {
+                        val fallback = repository.getCachedNews()
+                        if (fallback.isNotEmpty()) {
+                            _feedState.value = FeedState.Success(fallback)
+                            _refreshStatusMessage.value = "Showing offline stories • Live feeds unreachable"
                         } else {
                             _feedState.value = FeedState.Error("Failed to fetch articles. Please check your network connection or try again.")
                         }
                     }
-                } else {
-                    _feedState.value = FeedState.Success(articles)
-                    runBlindspotAnalysis(articles)
                 }
-
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                if (_feedState.value !is FeedState.Success) {
+                val fallback = repository.getCachedNews()
+                if (fallback.isNotEmpty()) {
+                    _feedState.value = FeedState.Success(fallback)
+                    _refreshStatusMessage.value = "Offline mode active"
+                } else {
                     _feedState.value = FeedState.Error("An unexpected error occurred: ${e.localizedMessage}")
                 }
+            } finally {
+                _isRefreshing.value = false
             }
         }
     }
@@ -296,21 +343,21 @@ class NewsViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             repository.toggleSource(source)
             // Automatically refresh feed when sources change to immediately show/hide relevant content
-            refreshNews()
+            refreshNews(force = true)
         }
     }
 
     fun addCustomSource(name: String, url: String, category: String) {
         viewModelScope.launch {
             repository.addSource(name, url, category)
-            refreshNews()
+            refreshNews(force = true)
         }
     }
 
     fun deleteCustomSource(source: NewsSource) {
         viewModelScope.launch {
             repository.deleteCustomSource(source)
-            refreshNews()
+            refreshNews(force = true)
         }
     }
 
@@ -587,7 +634,7 @@ class NewsViewModel(application: Application) : AndroidViewModel(application) {
         // Clear cached impacts so they regenerate for new region
         _localImpacts.value = emptyMap()
         // Sync FCM topic for newly selected region
-        com.example.util.NotificationHelper.syncFcmRegionTopics(region)
+        com.example.util.NotificationHelper.syncFcmRegionTopics(getApplication(), region)
         // Re-run blindspot analysis for new region
         runBlindspotAnalysis()
     }

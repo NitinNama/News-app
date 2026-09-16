@@ -10,28 +10,12 @@ import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
-import com.google.firebase.FirebaseApp
-import com.google.firebase.FirebaseOptions
 import com.google.firebase.messaging.FirebaseMessaging
 
 object NotificationHelper {
     const val CHANNEL_ID = "breaking_news_channel"
     const val CHANNEL_NAME = "Breaking News Alerts"
     const val CHANNEL_DESC = "Real-time personalized push notifications for breaking news and blindspot detection."
-
-    private fun hasValidRealFirebase(context: Context?): Boolean {
-        if (context == null) return false
-        return try {
-            val apps = FirebaseApp.getApps(context)
-            if (apps.isNotEmpty()) {
-                val app = FirebaseApp.getInstance()
-                val apiKey = app.options.apiKey
-                apiKey.isNotBlank() && !apiKey.contains("Dummy") && apiKey != "MY_GEMINI_API_KEY"
-            } else false
-        } catch (e: Exception) {
-            false
-        }
-    }
 
     fun createNotificationChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -94,53 +78,68 @@ object NotificationHelper {
         notificationManager.notify(notificationId, builder.build())
     }
 
-    fun syncFcmRegionTopics(region: String, context: Context? = null) {
+    fun syncFcmRegionTopics(region: String) {
+        syncFcmRegionTopics(null, region)
+    }
+
+    fun syncFcmRegionTopics(context: Context?, region: String) {
+        if (context != null && !isFirebaseAvailable(context)) {
+            Log.i("NotificationHelper", "FirebaseApp is not initialized. FCM features disabled.")
+            return
+        }
         try {
-            if (hasValidRealFirebase(context)) {
-                val fcm = FirebaseMessaging.getInstance()
-                fcm.subscribeToTopic("breaking_news")
-                    .addOnCompleteListener { task ->
-                        if (task.isSuccessful) {
-                            Log.d("NotificationHelper", "Subscribed to FCM topic: breaking_news")
-                        }
+            val fcm = FirebaseMessaging.getInstance()
+            fcm.subscribeToTopic("breaking_news")
+                .addOnCompleteListener { task ->
+                    if (task.isSuccessful) {
+                        Log.d("NotificationHelper", "Subscribed to FCM topic: breaking_news")
                     }
-                
-                val formattedRegion = region.replace(" ", "_").lowercase()
-                fcm.subscribeToTopic("region_$formattedRegion")
-                    .addOnCompleteListener { task ->
-                        if (task.isSuccessful) {
-                            Log.d("NotificationHelper", "Subscribed to FCM topic: region_$formattedRegion")
-                        }
+                }
+            
+            val formattedRegion = region.replace(" ", "_").lowercase()
+            fcm.subscribeToTopic("region_$formattedRegion")
+                .addOnCompleteListener { task ->
+                    if (task.isSuccessful) {
+                        Log.d("NotificationHelper", "Subscribed to FCM topic: region_$formattedRegion")
                     }
-            } else {
-                Log.d("NotificationHelper", "Local notification mode active (Subscribed: breaking_news, region_${region.lowercase()})")
-            }
+                }
         } catch (e: Exception) {
-            Log.w("NotificationHelper", "FCM topic sync status: ${e.message}")
+            Log.i("NotificationHelper", "FCM disabled or not initialized: ${e.message}")
         }
     }
 
-    fun fetchFcmToken(context: Context? = null, onTokenRetrieved: (String) -> Unit) {
+    fun fetchFcmToken(onTokenRetrieved: (String) -> Unit) {
+        fetchFcmToken(null, onTokenRetrieved)
+    }
+
+    fun fetchFcmToken(context: Context?, onTokenRetrieved: (String) -> Unit) {
+        if (context != null && !isFirebaseAvailable(context)) {
+            Log.i("NotificationHelper", "FirebaseApp is not initialized. FCM features disabled.")
+            return
+        }
         try {
-            if (hasValidRealFirebase(context)) {
-                FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
-                    if (task.isSuccessful && task.result != null) {
-                        val token = task.result
-                        Log.d("NotificationHelper", "FCM Token: $token")
-                        onTokenRetrieved(token)
-                    } else {
-                        Log.d("NotificationHelper", "Local notification active device token assigned")
-                        onTokenRetrieved("fcm_device_token_active_local")
-                    }
+            FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
+                if (task.isSuccessful && task.result != null) {
+                    val token = task.result
+                    Log.d("NotificationHelper", "FCM Token: $token")
+                    onTokenRetrieved(token)
+                } else {
+                    Log.w("NotificationHelper", "Fetching FCM registration token failed", task.exception)
                 }
-            } else {
-                Log.d("NotificationHelper", "Local notification active device token assigned")
-                onTokenRetrieved("fcm_device_token_active_local")
             }
         } catch (e: Exception) {
-            Log.w("NotificationHelper", "FCM token fallback used: ${e.message}")
-            onTokenRetrieved("fcm_device_token_active_local")
+            Log.i("NotificationHelper", "FCM disabled or not initialized: ${e.message}")
+        }
+    }
+
+    private fun isFirebaseAvailable(context: Context): Boolean {
+        return try {
+            if (com.google.firebase.FirebaseApp.getApps(context).isEmpty()) {
+                com.google.firebase.FirebaseApp.initializeApp(context)
+            }
+            com.google.firebase.FirebaseApp.getApps(context).isNotEmpty()
+        } catch (e: Exception) {
+            false
         }
     }
 }
-

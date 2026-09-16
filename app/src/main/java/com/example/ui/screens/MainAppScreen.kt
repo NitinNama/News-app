@@ -5,8 +5,10 @@ import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -30,6 +32,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -62,6 +65,9 @@ fun MainAppScreen(
     var currentTab by remember { mutableStateOf("Feed") } // "Feed", "Sources", "Bookmarks", "Settings"
 
     val feedState by viewModel.feedState.collectAsState()
+    val isRefreshing by viewModel.isRefreshing.collectAsState()
+    val lastRefreshedTime by viewModel.lastRefreshedTime.collectAsState()
+    val refreshStatusMessage by viewModel.refreshStatusMessage.collectAsState()
     val filteredArticles by viewModel.filteredArticles.collectAsState()
     val allSources by viewModel.allSources.collectAsState()
     val savedArticles by viewModel.savedArticles.collectAsState()
@@ -203,8 +209,11 @@ fun MainAppScreen(
                 currentTab = currentTab,
                 searchQuery = searchQuery,
                 onSearchChanged = { viewModel.setSearchQuery(it) },
-                onRefresh = { viewModel.refreshNews() },
-                isLoading = feedState is FeedState.Loading,
+                onRefresh = {
+                    Toast.makeText(context, "Refreshing news feeds...", Toast.LENGTH_SHORT).show()
+                    viewModel.refreshNews(force = true)
+                },
+                isLoading = isRefreshing || (feedState is FeedState.Loading),
                 onAddSourceClick = {
                     if (currentTab == "Portfolio") {
                         showAddPortfolioDialog = true
@@ -237,12 +246,17 @@ fun MainAppScreen(
                     FeedTabContent(
                         feedState = feedState,
                         articles = filteredArticles,
+                        isRefreshing = isRefreshing,
+                        lastRefreshedTime = lastRefreshedTime,
+                        refreshStatusMessage = refreshStatusMessage,
+                        onDismissRefreshMessage = { viewModel.clearRefreshStatusMessage() },
+                        onRefresh = { viewModel.refreshNews(force = true) },
                         selectedCategory = selectedCategory,
                         onCategorySelected = { viewModel.setSelectedCategory(it) },
                         onArticleClick = { selectedArticleForDetail = it },
                         onBookmarkToggle = { viewModel.toggleBookmark(it) },
                         onShareClick = { shareArticle(context, it) },
-                        onRetry = { viewModel.refreshNews() },
+                        onRetry = { viewModel.refreshNews(force = true) },
                         articleSummaries = articleSummaries,
                         summarizingStates = summarizingStates,
                         onGenerateSummary = { viewModel.generateSummaryForArticle(it) },
@@ -474,6 +488,8 @@ fun NewsTopAppBar(
                         contentDescription = "Search"
                     )
                 }
+            }
+            if (currentTab == "Feed" || currentTab == "Portfolio" || currentTab == "Sources") {
                 IconButton(onClick = onRefresh, enabled = !isLoading, modifier = Modifier.testTag("refresh_button")) {
                     if (isLoading) {
                         CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
@@ -481,6 +497,8 @@ fun NewsTopAppBar(
                         Icon(imageVector = Icons.Default.Refresh, contentDescription = "Refresh")
                     }
                 }
+            }
+            if (currentTab == "Feed") {
                 IconButton(
                     onClick = onNotificationPushClick,
                     modifier = Modifier.testTag("push_notification_button")
@@ -665,10 +683,16 @@ data class MarketItem(
     val isUp: Boolean
 )
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FeedTabContent(
     feedState: FeedState,
     articles: List<NewsArticle>,
+    isRefreshing: Boolean = false,
+    onRefresh: () -> Unit = {},
+    lastRefreshedTime: Long = 0L,
+    refreshStatusMessage: String? = null,
+    onDismissRefreshMessage: () -> Unit = {},
     selectedCategory: String,
     onCategorySelected: (String) -> Unit,
     onArticleClick: (NewsArticle) -> Unit,
@@ -690,7 +714,7 @@ fun FeedTabContent(
         MarketTickerRow(marketQuotes = marketQuotes)
         // Horizontal category selector
         LazyRow(
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
@@ -709,11 +733,139 @@ fun FeedTabContent(
             }
         }
 
-        // Main content list or status
-        when (feedState) {
+        // Freshness status & Quick Refresh Row
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            val formattedTime = remember(lastRefreshedTime) {
+                if (lastRefreshedTime <= 0L) "Not updated yet"
+                else {
+                    val sdf = java.text.SimpleDateFormat("hh:mm a", java.util.Locale.getDefault())
+                    "Updated " + sdf.format(java.util.Date(lastRefreshedTime))
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Schedule,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    modifier = Modifier.size(13.dp)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = formattedTime,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            TextButton(
+                onClick = onRefresh,
+                enabled = !isRefreshing,
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                modifier = Modifier.height(28.dp).testTag("feed_quick_refresh_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Refresh,
+                    contentDescription = null,
+                    modifier = Modifier.size(13.dp)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = if (isRefreshing) "Refreshing..." else "Refresh Now",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+
+        // Animated Refresh Feedback Banner
+        AnimatedVisibility(
+            visible = refreshStatusMessage != null,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically()
+        ) {
+            refreshStatusMessage?.let { msg ->
+                Surface(
+                    color = if (msg.contains("offline", ignoreCase = true) || msg.contains("unreachable", ignoreCase = true))
+                        MaterialTheme.colorScheme.errorContainer
+                    else
+                        MaterialTheme.colorScheme.primaryContainer,
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = if (msg.contains("offline", ignoreCase = true)) Icons.Default.CloudOff else Icons.Default.CheckCircle,
+                                contentDescription = null,
+                                tint = if (msg.contains("offline", ignoreCase = true)) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = msg,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (msg.contains("offline", ignoreCase = true)) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        }
+                        IconButton(
+                            onClick = onDismissRefreshMessage,
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Dismiss",
+                                modifier = Modifier.size(14.dp),
+                                tint = if (msg.contains("offline", ignoreCase = true)) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (isRefreshing) {
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(3.dp)
+                    .testTag("feed_refresh_progress"),
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.surfaceVariant
+            )
+        }
+
+        PullToRefreshBox(
+            isRefreshing = isRefreshing,
+            onRefresh = onRefresh,
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+        ) {
+            // Main content list or status
+            when (feedState) {
             is FeedState.Loading -> {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState()),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(32.dp)) {
                         CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
                         Spacer(modifier = Modifier.height(16.dp))
                         Text(
@@ -725,7 +877,13 @@ fun FeedTabContent(
                 }
             }
             is FeedState.Error -> {
-                Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(24.dp)
+                        .verticalScroll(rememberScrollState()),
+                    contentAlignment = Alignment.Center
+                ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(
                             imageVector = Icons.Default.CloudOff,
@@ -749,7 +907,13 @@ fun FeedTabContent(
             }
             is FeedState.Success -> {
                 if (articles.isEmpty()) {
-                    Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(24.dp)
+                            .verticalScroll(rememberScrollState()),
+                        contentAlignment = Alignment.Center
+                    ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Icon(
                                 imageVector = Icons.Default.Newspaper,
@@ -823,6 +987,7 @@ fun FeedTabContent(
             }
         }
     }
+}
 }
 
 @Composable

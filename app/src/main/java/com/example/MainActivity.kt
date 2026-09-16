@@ -31,9 +31,6 @@ class MainActivity : ComponentActivity() {
       }
     }
 
-    // Initialize Firebase safely for FCM notification services
-    com.example.util.NotificationHelper.fetchFcmToken(this) { }
-
     setContent {
       val viewModel: NewsViewModel = viewModel()
       val customDarkMode by viewModel.isDarkMode.collectAsState()

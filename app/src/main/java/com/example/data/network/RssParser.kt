@@ -12,7 +12,7 @@ class RssParser {
         try {
             val parser = Xml.newPullParser()
             parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
-            parser.setInput(inputStream, null)
+            parser.setInput(inputStream, "UTF-8")
 
             var eventType = parser.eventType
             var currentTitle = ""
@@ -23,10 +23,10 @@ class RssParser {
             var insideItem = false
 
             while (eventType != XmlPullParser.END_DOCUMENT) {
-                val name = parser.name
+                val name = parser.name ?: ""
                 when (eventType) {
                     XmlPullParser.START_TAG -> {
-                        if (name.equals("item", ignoreCase = true)) {
+                        if (name.equals("item", ignoreCase = true) || name.equals("entry", ignoreCase = true)) {
                             insideItem = true
                             currentTitle = ""
                             currentLink = ""
@@ -39,34 +39,47 @@ class RssParser {
                                     currentTitle = readText(parser)
                                 }
                                 name.equals("link", ignoreCase = true) -> {
-                                    currentLink = readText(parser)
-                                }
-                                name.equals("description", ignoreCase = true) -> {
-                                    val desc = readText(parser)
-                                    currentDescription = stripHtml(desc)
-                                    // Try to extract image source from HTML description if no other image is found yet
-                                    if (currentImageUrl == null) {
-                                        currentImageUrl = extractImageFromHtml(desc)
+                                    val href = parser.getAttributeValue(null, "href")
+                                    val linkText = if (!parser.isEmptyElementTag) readText(parser).trim() else ""
+                                    if (!href.isNullOrBlank()) {
+                                        val rel = parser.getAttributeValue(null, "rel")
+                                        if (rel == null || rel.equals("alternate", ignoreCase = true) || currentLink.isEmpty()) {
+                                            currentLink = href
+                                        }
+                                    } else if (linkText.isNotBlank()) {
+                                        currentLink = linkText
                                     }
                                 }
-                                name.equals("pubDate", ignoreCase = true) -> {
+                                name.equals("description", ignoreCase = true) ||
+                                name.equals("summary", ignoreCase = true) ||
+                                name.equals("content", ignoreCase = true) ||
+                                name.equals("content:encoded", ignoreCase = true) -> {
+                                    val descRaw = readText(parser)
+                                    val descClean = stripHtml(descRaw)
+                                    if (currentDescription.isEmpty() || descClean.length > currentDescription.length) {
+                                        currentDescription = descClean
+                                    }
+                                    if (currentImageUrl == null) {
+                                        currentImageUrl = extractImageFromHtml(descRaw)
+                                    }
+                                }
+                                name.equals("pubDate", ignoreCase = true) ||
+                                name.equals("published", ignoreCase = true) ||
+                                name.equals("updated", ignoreCase = true) ||
+                                name.equals("dc:date", ignoreCase = true) -> {
                                     currentPubDate = formatPubDate(readText(parser))
                                 }
                                 name.equals("enclosure", ignoreCase = true) -> {
                                     val type = parser.getAttributeValue(null, "type")
-                                    if (type != null && type.startsWith("image/", ignoreCase = true)) {
-                                        currentImageUrl = parser.getAttributeValue(null, "url")
-                                    }
-                                }
-                                name.equals("media:content", ignoreCase = true) || name.equals("content", ignoreCase = true) -> {
                                     val url = parser.getAttributeValue(null, "url")
-                                    if (url != null) {
+                                    if (url != null && (type == null || type.startsWith("image", ignoreCase = true))) {
                                         currentImageUrl = url
                                     }
                                 }
+                                name.equals("media:content", ignoreCase = true) ||
                                 name.equals("media:thumbnail", ignoreCase = true) -> {
                                     val url = parser.getAttributeValue(null, "url")
-                                    if (url != null) {
+                                    if (!url.isNullOrBlank()) {
                                         currentImageUrl = url
                                     }
                                 }
@@ -74,9 +87,9 @@ class RssParser {
                         }
                     }
                     XmlPullParser.END_TAG -> {
-                        if (name.equals("item", ignoreCase = true)) {
+                        if (name.equals("item", ignoreCase = true) || name.equals("entry", ignoreCase = true)) {
                             insideItem = false
-                            if (currentTitle.isNotEmpty() && currentLink.isNotEmpty()) {
+                            if (currentTitle.isNotBlank() && currentLink.isNotBlank()) {
                                 articles.add(
                                     NewsArticle(
                                         title = currentTitle.trim(),
@@ -101,20 +114,27 @@ class RssParser {
     }
 
     private fun readText(parser: XmlPullParser): String {
-        var result = ""
-        if (parser.next() == XmlPullParser.TEXT) {
-            result = parser.text
-            parser.nextTag()
+        val sb = StringBuilder()
+        var depth = 1
+        try {
+            while (depth > 0) {
+                when (val event = parser.next()) {
+                    XmlPullParser.START_TAG -> depth++
+                    XmlPullParser.END_TAG -> depth--
+                    XmlPullParser.TEXT, XmlPullParser.CDSECT -> sb.append(parser.text)
+                    XmlPullParser.END_DOCUMENT -> break
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
-        return result
+        return sb.toString()
     }
 
     private fun stripHtml(html: String): String {
-        // Strip HTML tags using regex
         val tagPattern = Pattern.compile("<[^>]*>")
         val matcher = tagPattern.matcher(html)
         var clean = matcher.replaceAll("")
-        // Decode common HTML entities
         clean = clean
             .replace("&amp;", "&")
             .replace("&lt;", "<")
@@ -128,7 +148,6 @@ class RssParser {
     }
 
     private fun extractImageFromHtml(html: String): String? {
-        // Look for <img src="url" ...> inside description
         try {
             val imgPattern = Pattern.compile("<img[^>]+src\\s*=\\s*['\"]([^'\"]+)['\"]", Pattern.CASE_INSENSITIVE)
             val matcher = imgPattern.matcher(html)
@@ -142,23 +161,16 @@ class RssParser {
     }
 
     private fun formatPubDate(rawDate: String): String {
-        // Clean up or format standard RSS pubDate (e.g. "Fri, 17 Jul 2026 22:30:00 GMT" -> "17 Jul 2026, 10:30 PM")
-        // To be safe and fast, let's just return a simpler readable string if parsing fails,
-        // or parse standard RFC-822 date formats.
         return try {
             val clean = rawDate.replace(Regex("\\s+"), " ").trim()
             if (clean.length > 16) {
-                // Slice out the main part "Fri, 17 Jul 2026 22:30"
-                // Let's just return a beautifully trimmed date string
                 val parts = clean.split(" ")
                 if (parts.size >= 4) {
-                    val dayOfWeek = parts[0] // e.g. "Fri,"
-                    val day = parts[1] // e.g. "17"
-                    val month = parts[2] // e.g. "Jul"
-                    val year = parts[3] // e.g. "2026"
+                    val day = parts.getOrNull(1) ?: ""
+                    val month = parts.getOrNull(2) ?: ""
+                    val year = parts.getOrNull(3) ?: ""
                     var time = ""
                     if (parts.size >= 5) {
-                        // Extract hour:minute
                         val timeParts = parts[4].split(":")
                         if (timeParts.size >= 2) {
                             val hour = timeParts[0].toIntOrNull() ?: 0
@@ -168,7 +180,11 @@ class RssParser {
                             time = ", $formattedHour:$minute $ampm"
                         }
                     }
-                    "$day $month $year$time"
+                    if (day.isNotEmpty() && month.isNotEmpty() && year.isNotEmpty()) {
+                        "$day $month $year$time"
+                    } else {
+                        clean
+                    }
                 } else {
                     clean
                 }

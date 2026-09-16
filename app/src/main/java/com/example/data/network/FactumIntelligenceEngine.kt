@@ -11,7 +11,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 object FactumIntelligenceEngine {
@@ -19,16 +18,10 @@ object FactumIntelligenceEngine {
 
     private val client = OkHttpClient.Builder()
         .addInterceptor(AiLoggingInterceptor("FactumEngine"))
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .writeTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
         .build()
-
-    // In-Memory Caches for AI responses
-    private val blindspotCache = ConcurrentHashMap<String, BlindspotReport>()
-    private val catchMeUpCache = ConcurrentHashMap<String, String>()
-    private val translationCache = ConcurrentHashMap<String, String>()
-    private val localImpactCache = ConcurrentHashMap<String, String>()
 
     private fun escapeJson(text: String): String {
         return text.replace("\\", "\\\\")
@@ -38,18 +31,13 @@ object FactumIntelligenceEngine {
             .replace("\t", "\\t")
     }
 
-    // Valid fast models in order
-    private val candidateModels = listOf("gemini-2.0-flash", "gemini-1.5-flash-latest")
+    private val candidateModels = listOf("gemini-3.5-flash", "gemini-3.1-flash-lite-preview", "gemini-flash-latest")
 
-    private suspend fun callGemini(
-        prompt: String, 
-        temperature: Double = 0.3,
-        maxTokens: Int = 300
-    ): String = withContext(Dispatchers.IO) {
+    private suspend fun callGemini(prompt: String, temperature: Double = 0.3): String = withContext(Dispatchers.IO) {
         val apiKey = BuildConfig.GEMINI_API_KEY
         if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY") {
-            Log.w(TAG, "Gemini API Key is missing or default.")
-            return@withContext "Error: API Key Missing"
+            Log.e(TAG, "Gemini API Key is missing or invalid.")
+            return@withContext "API key missing. Please configure GEMINI_API_KEY in AI Studio Secrets."
         }
 
         val jsonPayload = """
@@ -60,8 +48,7 @@ object FactumIntelligenceEngine {
                 }]
               }],
               "generationConfig": {
-                "temperature": $temperature,
-                "maxOutputTokens": $maxTokens
+                "temperature": $temperature
               }
             }
         """.trimIndent()
@@ -78,38 +65,34 @@ object FactumIntelligenceEngine {
                     .header("Content-Type", "application/json")
                     .build()
 
-                val response = client.newCall(request).execute()
-                val bodyString = response.body?.string() ?: ""
-                
-                if (response.code == 429) {
-                    Log.w(TAG, "Gemini API rate limit / quota reached (429). Using intelligent local fallback.")
-                    response.close()
-                    return@withContext "Error: Quota Exceeded (429)"
-                }
+                client.newCall(request).execute().use { response ->
+                    val bodyString = response.body?.string() ?: ""
+                    if (!response.isSuccessful) {
+                        Log.e(TAG, "API call for model $model failed (code ${response.code}): $bodyString")
+                        lastError = if (response.code == 429) {
+                            "AI rate limit reached (5 requests/min). Please try again in a few seconds."
+                        } else {
+                            "Error: API returned HTTP ${response.code}"
+                        }
+                        return@use
+                    }
 
-                if (!response.isSuccessful) {
-                    Log.w(TAG, "API call for model $model failed (code ${response.code})")
-                    lastError = "Error: API returned HTTP ${response.code}"
-                    response.close()
-                    continue
-                }
-
-                response.close()
-                val jsonResponse = JSONObject(bodyString)
-                val candidates = jsonResponse.optJSONArray("candidates")
-                if (candidates != null && candidates.length() > 0) {
-                    val content = candidates.getJSONObject(0).optJSONObject("content")
-                    if (content != null) {
-                        val parts = content.optJSONArray("parts")
-                        if (parts != null && parts.length() > 0) {
-                            return@withContext parts.getJSONObject(0).optString("text", "No response text generated.")
+                    val jsonResponse = JSONObject(bodyString)
+                    val candidates = jsonResponse.optJSONArray("candidates")
+                    if (candidates != null && candidates.length() > 0) {
+                        val content = candidates.getJSONObject(0).optJSONObject("content")
+                        if (content != null) {
+                            val parts = content.optJSONArray("parts")
+                            if (parts != null && parts.length() > 0) {
+                                return@withContext parts.getJSONObject(0).optString("text", "No response text generated.")
+                            }
                         }
                     }
+                    lastError = "Could not parse AI response."
                 }
-                lastError = "Could not parse AI response."
             } catch (e: Exception) {
-                Log.w(TAG, "Error calling Gemini for model $model: ${e.message}")
-                lastError = "Error: ${e.message}"
+                Log.e(TAG, "Error calling Gemini for model $model", e)
+                lastError = "Error connecting to AI service: ${e.message}"
             }
         }
         return@withContext lastError
@@ -128,20 +111,17 @@ object FactumIntelligenceEngine {
             )
         }
 
-        val cacheKey = "$userRegion:${articles.take(5).map { it.title.hashCode() }.hashCode()}"
-        blindspotCache[cacheKey]?.let { cached ->
-            Log.d(TAG, "Returning cached blindspot report for region $userRegion")
-            return@withContext cached
-        }
-
-        val articlesPayload = articles.take(5).joinToString("\n") { 
+        val articlesPayload = articles.take(8).joinToString("\n") { 
             "- Source: [${it.sourceName}] (${it.category}) Title: ${it.title}" 
         }
 
         val prompt = """
             You are the BLINDSPOT_DETECTOR module for Factum news.
             
-            Directive: Analyze cross-outlet coverage patterns across our global media sources with respect to the user's Designated Home Region: '$userRegion'. Identify major stories receiving heavy coverage in specific regions or outlets that are being overlooked or underreported by major global feeds or Western wire networks.
+            Directive: Analyze cross-outlet coverage patterns across our global media sources with respect to the user's Designated Home Region: '$userRegion'. Identify major stories receiving heavy coverage in specific regions or outlets (e.g., Deutsche Welle, France24, AFP, Premium Times, Mail & Guardian, The EastAfrican, Japan Times, ABC News Australia, PTI, The Hindu, China Daily) that are being overlooked or underreported by major global feeds or Western wire networks.
+            
+            Execution Command:
+            "Scan incoming article clusters. Flag stories with high coverage volume in regional source groups but near-zero footprint in main global feeds. Display a 'Blindspot Alert' card to the user detailing what is being overlooked in relation to $userRegion."
             
             Incoming Articles:
             $articlesPayload
@@ -158,23 +138,12 @@ object FactumIntelligenceEngine {
             Do not include markdown code block backticks surrounding JSON, just valid raw JSON text.
         """.trimIndent()
 
-        val responseText = callGemini(prompt, temperature = 0.2, maxTokens = 250)
+        val responseText = callGemini(prompt, temperature = 0.2)
         try {
             val cleanJson = responseText.replace("```json", "").replace("```", "").trim()
-            val report = if (cleanJson.startsWith("{")) {
-                val obj = JSONObject(cleanJson)
-                val jsonTrendingRegion = obj.optString("trendingRegion", "").ifEmpty { userRegion }
-                BlindspotReport(
-                    headline = obj.optString("headline", articles.firstOrNull()?.title ?: "Regional News Alert"),
-                    alertText = obj.optString("alertText", "This story is trending heavily in $userRegion regional feeds but has low coverage in global media."),
-                    trendingRegion = jsonTrendingRegion,
-                    overlookedRegion = obj.optString("overlookedRegion", "Global Media Feeds"),
-                    missingContext = obj.optString("missingContext", "Regional outlets in $userRegion are covering major trade, economic and diplomatic developments currently omitted from international headlines."),
-                    topSource = obj.optString("topSource", articles.firstOrNull()?.sourceName ?: "Regional Sources")
-                )
-            } else {
+            if (!cleanJson.startsWith("{")) {
                 val sample = articles.find { it.category.equals(userRegion, ignoreCase = true) || it.category == userRegion } ?: articles.first()
-                BlindspotReport(
+                return@withContext BlindspotReport(
                     headline = sample.title,
                     alertText = "This story is trending heavily in $userRegion regional feeds but has lower visibility in global networks. Here is what you're missing.",
                     trendingRegion = if (userRegion != "Global") userRegion else sample.category.ifEmpty { "Global" },
@@ -183,12 +152,20 @@ object FactumIntelligenceEngine {
                     topSource = sample.sourceName
                 )
             }
-            blindspotCache[cacheKey] = report
-            return@withContext report
+            val obj = JSONObject(cleanJson)
+            val jsonTrendingRegion = obj.optString("trendingRegion", "").ifEmpty { userRegion }
+            return@withContext BlindspotReport(
+                headline = obj.optString("headline", articles.firstOrNull()?.title ?: "Regional News Alert"),
+                alertText = obj.optString("alertText", "This story is trending heavily in $userRegion regional feeds but has low coverage in global media."),
+                trendingRegion = jsonTrendingRegion,
+                overlookedRegion = obj.optString("overlookedRegion", "Global Media Feeds"),
+                missingContext = obj.optString("missingContext", "Regional outlets in $userRegion are covering major trade, economic and diplomatic developments currently omitted from international headlines."),
+                topSource = obj.optString("topSource", articles.firstOrNull()?.sourceName ?: "Regional Sources")
+            )
         } catch (e: Exception) {
             Log.e(TAG, "Error parsing Blindspot JSON", e)
             val sample = articles.find { it.category.equals(userRegion, ignoreCase = true) || it.category == userRegion } ?: articles.first()
-            val fallback = BlindspotReport(
+            return@withContext BlindspotReport(
                 headline = sample.title,
                 alertText = "This story is trending heavily in $userRegion regional feeds but has lower visibility globally. Here is what you're missing.",
                 trendingRegion = if (userRegion != "Global") userRegion else sample.category.ifEmpty { "Global" },
@@ -196,36 +173,28 @@ object FactumIntelligenceEngine {
                 missingContext = "Key regulatory, economic, and political developments in $userRegion reported by ${sample.sourceName} have not been picked up by mainstream international wire services.",
                 topSource = sample.sourceName
             )
-            blindspotCache[cacheKey] = fallback
-            return@withContext fallback
         }
     }
 
     // 2. CATCH_ME_UP section
     suspend fun generateCatchMeUp(article: NewsArticle): String = withContext(Dispatchers.IO) {
-        val cacheKey = article.link.ifEmpty { article.title }
-        catchMeUpCache[cacheKey]?.let { cached ->
-            Log.d(TAG, "Returning cached catch me up timeline")
-            return@withContext cached
-        }
-
         val prompt = """
             You are the CATCH_ME_UP module for Factum news.
-            Provide instant backstory context for readers entering complex, long-running news cycles.
+            
+            Directive: Provide instant historical context for readers entering complex, long-running news cycles mid-story.
+            
+            Execution Command:
+            "When triggered on an article, ignore the breaking news text and extract the backstory. Generate a 3-bullet historical timeline outlining the key events from the past 6 to 12 months that led to today’s headline. Keep it strictly factual, chronologically ordered, and under 60 words total."
             
             Article:
             Title: ${article.title}
             Publisher: ${article.sourceName}
             Description: ${article.description}
             
-            Output ONLY a 3-bullet historical timeline starting each bullet with '• [Month/Year] '. Total word count must be under 50 words.
+            Output ONLY the 3-bullet historical timeline starting each bullet with '• [Month/Year] '. Total word count must be under 60 words.
         """.trimIndent()
 
-        val res = callGemini(prompt, temperature = 0.2, maxTokens = 200)
-        if (res.isNotBlank() && !res.startsWith("Error")) {
-            catchMeUpCache[cacheKey] = res
-        }
-        res
+        callGemini(prompt, temperature = 0.2)
     }
 
     // 3. INTERACTIVE_ARTICLE_CHAT
@@ -235,50 +204,48 @@ object FactumIntelligenceEngine {
         question: String
     ): String = withContext(Dispatchers.IO) {
         val articleContext = if (!fullArticleText.isNullOrBlank()) {
-            "Title: ${article.title}\nPublisher: ${article.sourceName}\nFull Text:\n${fullArticleText.take(1200)}"
+            "Title: ${article.title}\nPublisher: ${article.sourceName}\nFull Text:\n$fullArticleText"
         } else {
-            "Title: ${article.title}\nPublisher: ${article.sourceName}\nSummary: ${article.description.take(500)}"
+            "Title: ${article.title}\nPublisher: ${article.sourceName}\nSummary/Description: ${article.description}"
         }
 
         val prompt = """
             You are the INTERACTIVE_ARTICLE_CHAT module for Factum news.
-            Answer user questions strictly using the article context provided. If not mentioned, reply with: 'This detail isn't mentioned in the article.' Keep response under 60 words.
             
-            --- ARTICLE Context ---
+            Directive: Power an in-article conversational interface that answers reader questions using only the specific article text provided.
+            
+            Execution Command:
+            "Treat the current article text as your sole source of truth. Answer user queries strictly using facts present in the text. If a user asks a question that the article does not explicitly answer, respond with: 'This detail isn't mentioned in the article.' Never pull outside assumptions or hallucinate facts beyond the payload."
+            
+            --- ARTICLE TEXT PAYLOAD ---
             $articleContext
             ----------------------------
             
             User Query: $question
         """.trimIndent()
 
-        callGemini(prompt, temperature = 0.1, maxTokens = 200)
+        callGemini(prompt, temperature = 0.1)
     }
 
     // 4. REALTIME_NUANCED_TRANSLATION
     suspend fun generateNuancedTranslation(article: NewsArticle): String = withContext(Dispatchers.IO) {
-        val cacheKey = article.link.ifEmpty { article.title }
-        translationCache[cacheKey]?.let { cached ->
-            Log.d(TAG, "Returning cached translation")
-            return@withContext cached
-        }
-
         val prompt = """
             You are the REALTIME_NUANCED_TRANSLATION module for Factum news.
-            Translate the article text into clean English while preserving precise regional terms.
+            
+            Directive: Translate primary source news into clean, accurate English while preserving local political, cultural, and industry terminology.
+            
+            Execution Command:
+            "Translate foreign-language article feeds into natural English. Do not perform literal word-for-word translations if they distort meaning. Preserve precise regional terminology, economic metrics, and official titles. Add a subtle inline bracket [Note: ...] only when a regional idiom or policy name requires brief context."
             
             Article:
             Title: ${article.title}
             Publisher: ${article.sourceName}
             Text: ${article.description}
             
-            Provide the translated text in under 150 words.
+            Provide the translated and contextualized article text. Ensure any required context is provided via inline brackets like [Note: ...].
         """.trimIndent()
 
-        val res = callGemini(prompt, temperature = 0.3, maxTokens = 250)
-        if (res.isNotBlank() && !res.startsWith("Error")) {
-            translationCache[cacheKey] = res
-        }
-        res
+        callGemini(prompt, temperature = 0.3)
     }
 
     // 5. LOCAL_IMPACT_ANALYSIS
@@ -287,30 +254,29 @@ object FactumIntelligenceEngine {
         userRegion: String,
         userSector: String
     ): String = withContext(Dispatchers.IO) {
-        val cacheKey = "$userRegion:$userSector:${article.link.ifEmpty { article.title }}"
-        localImpactCache[cacheKey]?.let { cached ->
-            Log.d(TAG, "Returning cached local impact breakdown")
-            return@withContext cached
-        }
-
         val prompt = """
             You are the LOCAL_IMPACT_ANALYSIS module for Factum news.
-            Synthesize a 2-sentence breakdown under the header 'Why This Matters to You': Explain the direct local consequences on supply chains, prices, or policy for the user's region ($userRegion) and sector ($userSector).
+            
+            Directive: Bridge macro-level global news down to the individual user’s daily life and regional context.
+            
+            Execution Command:
+            "Read the global/national story payload and cross-reference it with the user's designated region or sector. Synthesize a 2-sentence breakdown under the header 'Why This Matters to You': Explain the direct local consequences, such as expected shifts in supply chains, local fuel/commodity prices, or domestic policy impact."
             
             Article:
             Title: ${article.title}
             Publisher: ${article.sourceName}
+            Category: ${article.category}
             Details: ${article.description}
             
-            Format starting with:
+            User Profile:
+            - Designated Region: $userRegion
+            - Designated Sector: $userSector
+            
+            Format your response starting exactly with the header:
             Why This Matters to You:
-            [2 sentences]
+            [2-sentence breakdown explaining direct local consequences on supply chains, fuel/commodity prices, or domestic policy impact].
         """.trimIndent()
 
-        val res = callGemini(prompt, temperature = 0.3, maxTokens = 200)
-        if (res.isNotBlank() && !res.startsWith("Error")) {
-            localImpactCache[cacheKey] = res
-        }
-        res
+        callGemini(prompt, temperature = 0.3)
     }
 }
