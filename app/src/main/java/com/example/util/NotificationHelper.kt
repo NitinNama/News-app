@@ -40,9 +40,15 @@ object NotificationHelper {
     ) {
         createNotificationChannel(context)
 
-        val intent = if (!articleUrl.isNullOrEmpty()) {
-            Intent(Intent.ACTION_VIEW, Uri.parse(articleUrl)).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        val intent = if (!articleUrl.isNullOrEmpty() && (articleUrl.startsWith("http://") || articleUrl.startsWith("https://"))) {
+            try {
+                Intent(Intent.ACTION_VIEW, Uri.parse(articleUrl)).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                }
+            } catch (e: Exception) {
+                Intent(context, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                }
             }
         } else {
             Intent(context, MainActivity::class.java).apply {
@@ -50,9 +56,10 @@ object NotificationHelper {
             }
         }
 
+        val requestCode = (System.currentTimeMillis() and 0x7FFFFFFF).toInt()
         val pendingIntent = PendingIntent.getActivity(
             context,
-            System.currentTimeMillis().toInt(),
+            requestCode,
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
@@ -74,7 +81,7 @@ object NotificationHelper {
 
         val notificationManager =
             context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val notificationId = (System.currentTimeMillis() % 10000).toInt()
+        val notificationId = (System.currentTimeMillis() and 0x7FFFFFFF).toInt() % 10000
         notificationManager.notify(notificationId, builder.build())
     }
 
@@ -118,7 +125,7 @@ object NotificationHelper {
             return
         }
         try {
-            FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
+            FirebaseMessaging.getInstance().getToken().addOnCompleteListener { task ->
                 if (task.isSuccessful && task.result != null) {
                     val token = task.result
                     Log.d("NotificationHelper", "FCM Token: $token")

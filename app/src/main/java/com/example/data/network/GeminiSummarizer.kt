@@ -29,7 +29,16 @@ object GeminiSummarizer {
             .replace("\t", "\\t")
     }
 
-    private val candidateModels = listOf("gemini-3.5-flash", "gemini-3.1-flash-lite-preview", "gemini-flash-latest")
+    private val baseCandidateModels = listOf("gemini-3.1-flash-lite-preview", "gemini-flash-latest", "gemini-3.5-flash")
+    private val modelCooldowns = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    private fun getAvailableCandidateModels(): List<String> {
+        val now = System.currentTimeMillis()
+        return baseCandidateModels.sortedBy { model ->
+            val cooldownUntil = modelCooldowns[model] ?: 0L
+            if (cooldownUntil > now) 1 else 0
+        }
+    }
 
     suspend fun generateSummary(title: String, description: String): String = withContext(Dispatchers.IO) {
         val apiKey = BuildConfig.GEMINI_API_KEY
@@ -56,7 +65,8 @@ object GeminiSummarizer {
         val requestBody = jsonPayload.toRequestBody("application/json; charset=utf-8".toMediaType())
 
         var lastError = "Unable to generate summary."
-        for (model in candidateModels) {
+        val modelsToTry = getAvailableCandidateModels()
+        for (model in modelsToTry) {
             val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
             try {
                 val request = Request.Builder()
@@ -68,14 +78,21 @@ object GeminiSummarizer {
                 client.newCall(request).execute().use { response ->
                     val bodyString = response.body?.string() ?: ""
                     if (!response.isSuccessful) {
-                        Log.e(TAG, "API call for model $model failed with code: ${response.code}, body: $bodyString")
-                        lastError = if (response.code == 429) {
-                            "AI rate limit reached (5 requests/min). Please try again in a few seconds."
+                        if (response.code == 503 || response.code == 429) {
+                            modelCooldowns[model] = System.currentTimeMillis() + 60_000L
+                            Log.w(TAG, "Model $model is temporarily unavailable (${response.code}). Trying fallback model...")
                         } else {
-                            "Failed to generate summary (Error ${response.code})."
+                            Log.w(TAG, "API call for model $model returned HTTP ${response.code}. Trying fallback model...")
+                        }
+                        lastError = when (response.code) {
+                            503 -> "AI service is temporarily experiencing high demand. Please try again shortly."
+                            429 -> "AI rate limit reached. Please try again in a few seconds."
+                            else -> "Failed to generate summary (Error ${response.code})."
                         }
                         return@use
                     }
+
+                    modelCooldowns.remove(model)
 
                     val jsonResponse = JSONObject(bodyString)
                     val candidates = jsonResponse.optJSONArray("candidates")
@@ -91,10 +108,11 @@ object GeminiSummarizer {
                     lastError = "Could not extract summary from response."
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Error calling Gemini API for model $model", e)
+                Log.w(TAG, "Transient network error calling Gemini for model $model: ${e.message}. Trying next candidate...")
                 lastError = "Error: Unable to connect to AI engine."
             }
         }
+        Log.e(TAG, "All candidate Gemini models failed to generate summary. Last error: $lastError")
         return@withContext lastError
     }
 
@@ -123,7 +141,8 @@ object GeminiSummarizer {
         val requestBody = jsonPayload.toRequestBody("application/json; charset=utf-8".toMediaType())
 
         var lastError = "Unable to generate full article."
-        for (model in candidateModels) {
+        val modelsToTry = getAvailableCandidateModels()
+        for (model in modelsToTry) {
             val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
             try {
                 val request = Request.Builder()
@@ -135,14 +154,21 @@ object GeminiSummarizer {
                 client.newCall(request).execute().use { response ->
                     val bodyString = response.body?.string() ?: ""
                     if (!response.isSuccessful) {
-                        Log.e(TAG, "API call for model $model failed with code: ${response.code}, body: $bodyString")
-                        lastError = if (response.code == 429) {
-                            "AI rate limit reached (5 requests/min). Please try again in a few seconds."
+                        if (response.code == 503 || response.code == 429) {
+                            modelCooldowns[model] = System.currentTimeMillis() + 60_000L
+                            Log.w(TAG, "Model $model is temporarily unavailable (${response.code}). Trying fallback model...")
                         } else {
-                            "Failed to generate full article (Error ${response.code})."
+                            Log.w(TAG, "API call for model $model returned HTTP ${response.code}. Trying fallback model...")
+                        }
+                        lastError = when (response.code) {
+                            503 -> "AI service is temporarily experiencing high demand. Please try again shortly."
+                            429 -> "AI rate limit reached. Please try again in a few seconds."
+                            else -> "Failed to generate full article (Error ${response.code})."
                         }
                         return@use
                     }
+
+                    modelCooldowns.remove(model)
 
                     val jsonResponse = JSONObject(bodyString)
                     val candidates = jsonResponse.optJSONArray("candidates")
@@ -158,10 +184,11 @@ object GeminiSummarizer {
                     lastError = "Could not extract article content from response."
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Error generating full article for model $model", e)
+                Log.w(TAG, "Transient network error generating full article for model $model: ${e.message}. Trying next candidate...")
                 lastError = "Error: Unable to connect to AI engine."
             }
         }
+        Log.e(TAG, "All candidate Gemini models failed to generate full article. Last error: $lastError")
         return@withContext lastError
     }
 }

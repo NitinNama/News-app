@@ -48,7 +48,10 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.Image
+import androidx.compose.ui.res.painterResource
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.example.data.model.NewsArticle
 import com.example.data.model.NewsSource
 import com.example.data.model.SavedArticle
@@ -948,7 +951,7 @@ fun FeedTabContent(
                         }
 
                         // Top Story / Hero Card (Only if "All" is selected and we have an image article)
-                        val heroArticle = articles.firstOrNull { it.imageUrl != null }
+                        val heroArticle = articles.firstOrNull { !it.imageUrl.isNullOrBlank() && (it.imageUrl.startsWith("http://") || it.imageUrl.startsWith("https://")) }
                         if (heroArticle != null && selectedCategory == "All") {
                             item(span = StaggeredGridItemSpan.FullLine) {
                                 HeroArticleCard(
@@ -1015,7 +1018,10 @@ fun HeroArticleCard(
                     .height(240.dp) // Taller, magnificent hero banner
             ) {
                 AsyncImage(
-                    model = article.imageUrl,
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(article.imageUrl)
+                        .crossfade(true)
+                        .build(),
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()
@@ -1390,9 +1396,12 @@ fun ArticleRowItem(
                 }
             }
 
-            if (article.imageUrl != null) {
+            if (!article.imageUrl.isNullOrBlank() && (article.imageUrl.startsWith("http://") || article.imageUrl.startsWith("https://"))) {
                 AsyncImage(
-                    model = article.imageUrl,
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(article.imageUrl)
+                        .crossfade(true)
+                        .build(),
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
@@ -1437,9 +1446,12 @@ fun ArticleGridCard(
             .testTag("article_grid_card")
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
-            if (article.imageUrl != null) {
+            if (!article.imageUrl.isNullOrBlank() && (article.imageUrl.startsWith("http://") || article.imageUrl.startsWith("https://"))) {
                 AsyncImage(
-                    model = article.imageUrl,
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(article.imageUrl)
+                        .crossfade(true)
+                        .build(),
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
@@ -1906,9 +1918,12 @@ fun BookmarksTabContent(
                                 }
                             }
 
-                            if (saved.imageUrl != null) {
+                            if (!saved.imageUrl.isNullOrBlank() && (saved.imageUrl.startsWith("http://") || saved.imageUrl.startsWith("https://"))) {
                                 AsyncImage(
-                                    model = saved.imageUrl,
+                                    model = ImageRequest.Builder(LocalContext.current)
+                                        .data(saved.imageUrl)
+                                        .crossfade(true)
+                                        .build(),
                                     contentDescription = null,
                                     contentScale = ContentScale.Crop,
                                     modifier = Modifier
@@ -2046,9 +2061,12 @@ fun ArticleDetailSheet(
             Spacer(modifier = Modifier.height(16.dp))
 
             // Large Image if available
-            if (article.imageUrl != null) {
+            if (!article.imageUrl.isNullOrBlank() && (article.imageUrl.startsWith("http://") || article.imageUrl.startsWith("https://"))) {
                 AsyncImage(
-                    model = article.imageUrl,
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(article.imageUrl)
+                        .crossfade(true)
+                        .build(),
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
@@ -3704,8 +3722,8 @@ fun SettingsTabContent(
                                     .padding(6.dp),
                                 contentAlignment = Alignment.Center
                             ) {
-                                AsyncImage(
-                                    model = iconDrawableRes,
+                                Image(
+                                    painter = painterResource(id = iconDrawableRes),
                                     contentDescription = "$label Preview",
                                     modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(8.dp)),
                                     contentScale = ContentScale.Crop

@@ -31,7 +31,16 @@ object FactumIntelligenceEngine {
             .replace("\t", "\\t")
     }
 
-    private val candidateModels = listOf("gemini-3.5-flash", "gemini-3.1-flash-lite-preview", "gemini-flash-latest")
+    private val baseCandidateModels = listOf("gemini-3.1-flash-lite-preview", "gemini-flash-latest", "gemini-3.5-flash")
+    private val modelCooldowns = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    private fun getAvailableCandidateModels(): List<String> {
+        val now = System.currentTimeMillis()
+        return baseCandidateModels.sortedBy { model ->
+            val cooldownUntil = modelCooldowns[model] ?: 0L
+            if (cooldownUntil > now) 1 else 0
+        }
+    }
 
     private suspend fun callGemini(prompt: String, temperature: Double = 0.3): String = withContext(Dispatchers.IO) {
         val apiKey = BuildConfig.GEMINI_API_KEY
@@ -56,7 +65,8 @@ object FactumIntelligenceEngine {
         val requestBody = jsonPayload.toRequestBody("application/json; charset=utf-8".toMediaType())
 
         var lastError = "Error connecting to AI service."
-        for (model in candidateModels) {
+        val modelsToTry = getAvailableCandidateModels()
+        for (model in modelsToTry) {
             val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
             try {
                 val request = Request.Builder()
@@ -68,14 +78,23 @@ object FactumIntelligenceEngine {
                 client.newCall(request).execute().use { response ->
                     val bodyString = response.body?.string() ?: ""
                     if (!response.isSuccessful) {
-                        Log.e(TAG, "API call for model $model failed (code ${response.code}): $bodyString")
-                        lastError = if (response.code == 429) {
-                            "AI rate limit reached (5 requests/min). Please try again in a few seconds."
+                        if (response.code == 503 || response.code == 429) {
+                            // Temporary high demand / rate limit: cool down this model for 60s
+                            modelCooldowns[model] = System.currentTimeMillis() + 60_000L
+                            Log.w(TAG, "Model $model is temporarily unavailable (${response.code}). Trying fallback model...")
                         } else {
-                            "Error: API returned HTTP ${response.code}"
+                            Log.w(TAG, "API call for model $model returned HTTP ${response.code}. Trying fallback model...")
+                        }
+                        lastError = when (response.code) {
+                            503 -> "AI model is currently experiencing temporary high demand. Please try again shortly."
+                            429 -> "AI rate limit reached. Please try again in a few seconds."
+                            else -> "Error: API returned HTTP ${response.code}"
                         }
                         return@use
                     }
+
+                    // Success: remove from cooldown if present
+                    modelCooldowns.remove(model)
 
                     val jsonResponse = JSONObject(bodyString)
                     val candidates = jsonResponse.optJSONArray("candidates")
@@ -91,10 +110,11 @@ object FactumIntelligenceEngine {
                     lastError = "Could not parse AI response."
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Error calling Gemini for model $model", e)
+                Log.w(TAG, "Transient network error calling Gemini for model $model: ${e.message}. Trying next candidate...")
                 lastError = "Error connecting to AI service: ${e.message}"
             }
         }
+        Log.e(TAG, "All candidate Gemini models failed. Last error: $lastError")
         return@withContext lastError
     }
 

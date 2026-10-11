@@ -118,7 +118,7 @@ class NewsRepository(
                 pubDate = cachedArticle.pubDate,
                 sourceName = cachedArticle.sourceName,
                 category = cachedArticle.category,
-                imageUrl = cachedArticle.imageUrl,
+                imageUrl = com.example.data.network.RssParser.cleanImageUrl(cachedArticle.imageUrl),
                 isBookmarked = savedLinks.contains(cachedArticle.link)
             )
         }
@@ -209,7 +209,7 @@ class NewsRepository(
                     pubDate = cachedArticle.pubDate,
                     sourceName = cachedArticle.sourceName,
                     category = cachedArticle.category,
-                    imageUrl = cachedArticle.imageUrl,
+                    imageUrl = com.example.data.network.RssParser.cleanImageUrl(cachedArticle.imageUrl),
                     isBookmarked = savedLinks.contains(cachedArticle.link)
                 )
             }
@@ -261,7 +261,7 @@ class NewsRepository(
                     pubDate = article.pubDate,
                     sourceName = article.sourceName,
                     category = article.category,
-                    imageUrl = article.imageUrl
+                    imageUrl = com.example.data.network.RssParser.cleanImageUrl(article.imageUrl)
                 )
             )
         }

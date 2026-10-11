@@ -73,15 +73,13 @@ class RssParser {
                                     val type = parser.getAttributeValue(null, "type")
                                     val url = parser.getAttributeValue(null, "url")
                                     if (url != null && (type == null || type.startsWith("image", ignoreCase = true))) {
-                                        currentImageUrl = url
+                                        cleanImageUrl(url)?.let { currentImageUrl = it }
                                     }
                                 }
                                 name.equals("media:content", ignoreCase = true) ||
                                 name.equals("media:thumbnail", ignoreCase = true) -> {
                                     val url = parser.getAttributeValue(null, "url")
-                                    if (!url.isNullOrBlank()) {
-                                        currentImageUrl = url
-                                    }
+                                    cleanImageUrl(url)?.let { currentImageUrl = it }
                                 }
                             }
                         }
@@ -98,7 +96,7 @@ class RssParser {
                                         pubDate = currentPubDate.trim().ifEmpty { "Recently" },
                                         sourceName = sourceName,
                                         category = category,
-                                        imageUrl = currentImageUrl
+                                        imageUrl = cleanImageUrl(currentImageUrl)
                                     )
                                 )
                             }
@@ -151,13 +149,58 @@ class RssParser {
         try {
             val imgPattern = Pattern.compile("<img[^>]+src\\s*=\\s*['\"]([^'\"]+)['\"]", Pattern.CASE_INSENSITIVE)
             val matcher = imgPattern.matcher(html)
-            if (matcher.find()) {
-                return matcher.group(1)
+            while (matcher.find()) {
+                val candidate = cleanImageUrl(matcher.group(1))
+                if (candidate != null) {
+                    return candidate
+                }
             }
         } catch (e: Exception) {
             e.printStackTrace()
         }
         return null
+    }
+
+    companion object {
+        fun cleanImageUrl(rawUrl: String?): String? {
+            if (rawUrl.isNullOrBlank()) return null
+            var url = rawUrl.trim()
+
+            // Discard base64 data URIs (usually tracking pixels or corrupt payloads that crash ImageDecoder)
+            if (url.startsWith("data:", ignoreCase = true)) return null
+
+            // Protocol-relative URLs (e.g. //lh3.googleusercontent.com/...)
+            if (url.startsWith("//")) {
+                url = "https:$url"
+            }
+
+            // Reject relative paths or unsupported non-http schemes
+            if (!url.startsWith("http://", ignoreCase = true) && !url.startsWith("https://", ignoreCase = true)) {
+                return null
+            }
+
+            // Clean common HTML entities that break URLs
+            url = url.replace("&amp;", "&")
+                .replace("&quot;", "")
+                .replace("&#39;", "'")
+                .trim()
+
+            // Filter out tracking beacons, 1x1 pixels, and analytics trackers
+            val lower = url.lowercase()
+            if (lower.contains("pixel.gif") ||
+                lower.contains("1x1") ||
+                lower.contains("feedburner.com/~r/") ||
+                lower.contains("doubleclick.net") ||
+                lower.contains("stats.wordpress.com") ||
+                lower.contains("tracking") ||
+                lower.contains("beacon") ||
+                lower.endsWith(".ico")
+            ) {
+                return null
+            }
+
+            return url
+        }
     }
 
     private fun formatPubDate(rawDate: String): String {
